@@ -12,6 +12,8 @@ import requests
 import certifi
 from io import StringIO
 
+from datetime import datetime
+from zoneinfo import ZoneInfo
 
 # =========================
 # CONFIGURACIÓN DE LA APP
@@ -49,6 +51,12 @@ def cargar_datos():
     df["date"] = pd.to_datetime(df["date"])
     
     return df
+    
+@st.cache_data
+def cargar_calendario():
+    calendario = pd.read_csv("partidos_mundial.csv")
+    calendario["fecha"] = pd.to_datetime(calendario["fecha"]).dt.date
+    return calendario
 
 
 # =========================
@@ -361,6 +369,28 @@ def mostrar_reporte_partido(
     )
 
     return resultados
+    
+def obtener_partidos_por_fecha(calendario, fecha):
+    partidos_fecha = calendario[calendario["fecha"] == fecha].copy()
+
+    partidos = list(
+        zip(
+            partidos_fecha["equipo_a"],
+            partidos_fecha["equipo_b"]
+        )
+    )
+
+    return partidos, partidos_fecha
+
+
+def filtrar_partidos_validos(partidos, equipos_validos):
+    partidos_validos = []
+
+    for equipo_a, equipo_b in partidos:
+        if equipo_a in equipos_validos and equipo_b in equipos_validos:
+            partidos_validos.append((equipo_a, equipo_b))
+
+    return partidos_validos    
 
 # =========================
 # SIDEBAR
@@ -431,21 +461,21 @@ with st.sidebar.expander("Información del modelo"):
 
 st.divider()
 
-partidos_rapidos_base = [
-    ("Brazil", "Haiti"),
-    ("Turkey", "Paraguay"),
-    ("Netherlands", "Sweden"),
-    ("Germany", "Ivory Coast"),
-    ("Ecuador", "Curaçao"),
-    ("Tunisia", "Japan"),
-]
+calendario_partidos = cargar_calendario()
 
-# Solo mostramos partidos cuyos equipos existan en el dataset
-partidos_rapidos = [
-    (a, b)
-    for a, b in partidos_rapidos_base
-    if a in equipos_validos and b in equipos_validos
-]
+hoy_mexico = datetime.now(
+    ZoneInfo("America/Mexico_City")
+).date()
+
+partidos_rapidos_base, partidos_hoy_df = obtener_partidos_por_fecha(
+    calendario_partidos,
+    hoy_mexico
+)
+
+partidos_rapidos = filtrar_partidos_validos(
+    partidos_rapidos_base,
+    equipos_validos
+)
 
 tab_uno, tab_dia = st.tabs([
     "Calcular un partido",
@@ -531,15 +561,67 @@ with tab_uno:
 # =========================
 
 with tab_dia:
-    st.markdown("## Partidos rápidos del día")
+    st.markdown("## Partidos por fecha")
 
-    if len(partidos_rapidos) == 0:
-        st.warning("No se encontraron partidos rápidos con nombres válidos en el dataset.")
-    else:
-        tabla_partidos = pd.DataFrame(
-            partidos_rapidos,
-            columns=["Equipo A", "Equipo B"]
+    fechas_disponibles = sorted(
+        calendario_partidos["fecha"].unique()
+    )
+
+    fecha_seleccionada = st.date_input(
+        "Selecciona una fecha",
+        value=hoy_mexico
+    )
+
+    partidos_fecha_base, partidos_fecha_df = obtener_partidos_por_fecha(
+        calendario_partidos,
+        fecha_seleccionada
+    )
+
+    partidos_fecha = filtrar_partidos_validos(
+        partidos_fecha_base,
+        equipos_validos
+    )
+
+    if len(partidos_fecha_df) == 0:
+        st.warning("No hay partidos registrados para esta fecha en el calendario CSV.")
+
+        st.markdown("Fechas disponibles en el calendario:")
+
+        fechas_df = pd.DataFrame({
+            "Fechas disponibles": fechas_disponibles
+        })
+
+        st.dataframe(
+            fechas_df,
+            use_container_width=True,
+            hide_index=True
         )
+
+    elif len(partidos_fecha) == 0:
+        st.warning("Hay partidos en el CSV, pero los nombres no coinciden con el dataset.")
+
+        st.markdown("Partidos encontrados en el CSV:")
+
+        st.dataframe(
+            partidos_fecha_df,
+            use_container_width=True,
+            hide_index=True
+        )
+
+        st.info("Revisa que los nombres de los equipos coincidan con el dataset.")
+
+    else:
+        st.markdown(f"### Partidos para {fecha_seleccionada}")
+
+        tabla_partidos = partidos_fecha_df[
+            [
+                "fecha",
+                "equipo_a",
+                "equipo_b",
+                "grupo",
+                "sede"
+            ]
+        ].copy()
 
         st.dataframe(
             tabla_partidos,
@@ -548,15 +630,15 @@ with tab_dia:
         )
 
         calcular_todos = st.button(
-            "Calcular todos los partidos del día",
+            "Calcular todos los partidos de esta fecha",
             type="primary",
-            key="calcular_todos"
+            key="calcular_todos_fecha"
         )
 
         if calcular_todos:
             resultados_exportar = []
 
-            for i, (equipo_a_dia, equipo_b_dia) in enumerate(partidos_rapidos):
+            for i, (equipo_a_dia, equipo_b_dia) in enumerate(partidos_fecha):
                 with st.expander(
                     f"{equipo_a_dia} vs {equipo_b_dia}",
                     expanded=(i == 0)
@@ -568,31 +650,34 @@ with tab_dia:
                         neutral=True,
                         max_goles=max_goles,
                         rho=rho,
-                        key_prefix=f"dia_{i}"
+                        key_prefix=f"fecha_{fecha_seleccionada}_{i}"
                     )
 
                     temp = resultados.copy()
                     temp["partido"] = f"{equipo_a_dia} vs {equipo_b_dia}"
+                    temp["fecha"] = fecha_seleccionada
                     temp["probabilidad_%"] = temp["probabilidad"] * 100
 
                     resultados_exportar.append(temp)
 
             if len(resultados_exportar) > 0:
-                df_resultados_dia = pd.concat(
+                df_resultados_fecha = pd.concat(
                     resultados_exportar,
                     ignore_index=True
                 )
 
                 st.divider()
 
-                st.subheader("Descargar todos los resultados del día")
+                st.subheader("Descargar todos los resultados de la fecha")
+
+                nombre_csv = f"predicciones_{fecha_seleccionada}.csv"
 
                 st.download_button(
                     label="Descargar CSV con todos los partidos",
-                    data=df_resultados_dia.to_csv(index=False).encode("utf-8"),
-                    file_name="predicciones_partidos_del_dia.csv",
+                    data=df_resultados_fecha.to_csv(index=False).encode("utf-8"),
+                    file_name=nombre_csv,
                     mime="text/csv",
-                    key="download_todos_los_partidos"
+                    key=f"download_todos_{fecha_seleccionada}"
                 )
         else:
-            st.info("Da clic en Calcular todos los partidos del día para generar los reportes.")
+            st.info("Da clic en Calcular todos los partidos de esta fecha para generar los reportes.")
