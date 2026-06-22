@@ -49,25 +49,87 @@ def cargar_datos():
     
     df = pd.read_csv(csv_data)
     df["date"] = pd.to_datetime(df["date"])
+
+    # Agregamos resultados reales del Mundial 2026 si existe el archivo
+    try:
+        df_extra = pd.read_csv("resultados_mundial_2026.csv")
+        df_extra["date"] = pd.to_datetime(df_extra["date"])
+
+        df_extra["neutral"] = (
+            df_extra["neutral"]
+            .astype(str)
+            .str.upper()
+            .map({
+                "TRUE": True,
+                "FALSE": False
+            })
+        )
+
+        # Usamos las mismas columnas del dataset principal
+        df_extra = df_extra[df.columns]
+
+        df = pd.concat(
+            [df, df_extra],
+            ignore_index=True
+        )
+
+        df = df.drop_duplicates(
+            subset=["date", "home_team", "away_team"],
+            keep="last"
+        )
+
+    except FileNotFoundError:
+        pass
     
     return df
-    
+
+
 @st.cache_data
 def cargar_calendario():
     calendario = pd.read_csv("partidos_mundial.csv")
     calendario["fecha"] = pd.to_datetime(calendario["fecha"]).dt.date
     return calendario
+@st.cache_data
+def cargar_ratings():
+    try:
+        ratings = pd.read_csv("ratings_equipos.csv")
+    except FileNotFoundError:
+        ratings = pd.DataFrame(columns=["equipo", "elo"])
 
+    return ratings
+
+
+def obtener_elo_equipo(equipo, ratings_df):
+    if ratings_df is None:
+        return 1500
+
+    if ratings_df.empty:
+        return 1500
+
+    fila = ratings_df[ratings_df["equipo"] == equipo]
+
+    if fila.empty:
+        return 1500
+
+    return float(fila["elo"].iloc[0])
 
 # =========================
 # ENTRENAR MODELO
 # =========================
 
 @st.cache_resource
-def entrenar_modelo(fecha_inicio="2018-01-01", min_partidos=5, xi=0.0015):
+def entrenar_modelo(fecha_inicio="2020-01-01", min_partidos=8, xi=0.0015):
     df = cargar_datos()
 
-    df_recent = df[df["date"] >= fecha_inicio].copy()
+    fecha_inicio_dt = pd.to_datetime(fecha_inicio)
+
+    df_recent = df[df["date"] >= fecha_inicio_dt].copy()
+
+    # Para que la app sea más rápida en Streamlit Cloud,
+    # usamos solo los partidos más recientes dentro del filtro.
+    max_partidos_entrenamiento = 5000
+
+    df_recent = df_recent.sort_values("date").tail(max_partidos_entrenamiento).copy()
 
     partidos_modelo = df_recent[
         [
@@ -76,7 +138,8 @@ def entrenar_modelo(fecha_inicio="2018-01-01", min_partidos=5, xi=0.0015):
             "away_team",
             "home_score",
             "away_score",
-            "neutral"
+            "neutral",
+            "tournament"
         ]
     ].copy()
 
@@ -98,7 +161,8 @@ def entrenar_modelo(fecha_inicio="2018-01-01", min_partidos=5, xi=0.0015):
             "home_team",
             "away_team",
             "home_score",
-            "neutral"
+            "neutral",
+            "tournament"
         ]
     ].copy()
 
@@ -107,7 +171,8 @@ def entrenar_modelo(fecha_inicio="2018-01-01", min_partidos=5, xi=0.0015):
         "team",
         "opponent",
         "goals",
-        "neutral"
+        "neutral",
+        "tournament"
     ]
 
     home_rows["is_home"] = np.where(home_rows["neutral"] == True, 0, 1)
@@ -118,7 +183,8 @@ def entrenar_modelo(fecha_inicio="2018-01-01", min_partidos=5, xi=0.0015):
             "away_team",
             "home_team",
             "away_score",
-            "neutral"
+            "neutral",
+            "tournament"
         ]
     ].copy()
 
@@ -127,17 +193,37 @@ def entrenar_modelo(fecha_inicio="2018-01-01", min_partidos=5, xi=0.0015):
         "team",
         "opponent",
         "goals",
-        "neutral"
+        "neutral",
+        "tournament"
     ]
 
     away_rows["is_home"] = 0
 
     model_data = pd.concat([home_rows, away_rows], ignore_index=True)
 
+    model_data["tournament"] = model_data["tournament"].fillna("")
+
     fecha_max = model_data["date"].max()
+
     dias_desde_partido = (fecha_max - model_data["date"]).dt.days
 
     model_data["peso"] = np.exp(-xi * dias_desde_partido)
+
+    # Damos más peso a partidos de Copa Mundial
+    peso_mundial = np.where(
+        model_data["tournament"].astype(str).str.contains("FIFA World Cup", case=False, na=False),
+        2.0,
+        1.0
+    )
+
+    # Damos todavía más peso a partidos del Mundial 2026 ya jugados
+    peso_mundial_2026 = np.where(
+        model_data["date"] >= pd.to_datetime("2026-06-11"),
+        4.0,
+        1.0
+    )
+
+    model_data["peso"] = model_data["peso"] * peso_mundial * peso_mundial_2026
 
     formula = "goals ~ is_home + C(team) + C(opponent)"
 
@@ -146,7 +232,7 @@ def entrenar_modelo(fecha_inicio="2018-01-01", min_partidos=5, xi=0.0015):
         data=model_data,
         family=sm.families.Poisson(),
         freq_weights=model_data["peso"]
-    ).fit(maxiter=100)
+    ).fit(maxiter=50)
 
     info_modelo = {
         "partidos_usados": len(partidos_modelo),
@@ -158,12 +244,18 @@ def entrenar_modelo(fecha_inicio="2018-01-01", min_partidos=5, xi=0.0015):
 
     return modelo_poisson, equipos_validos, info_modelo
 
-
 # =========================
 # FUNCIONES DEL MODELO
 # =========================
 
-def goles_esperados_poisson(modelo_poisson, equipo_a, equipo_b, neutral=True):
+def goles_esperados_poisson(
+    modelo_poisson,
+    equipo_a,
+    equipo_b,
+    neutral=True,
+    ratings_df=None,
+    peso_elo=0.35
+):
     is_home_a = 0 if neutral else 1
 
     datos_prediccion = pd.DataFrame({
@@ -174,10 +266,37 @@ def goles_esperados_poisson(modelo_poisson, equipo_a, equipo_b, neutral=True):
 
     predicciones = modelo_poisson.predict(datos_prediccion)
 
-    goles_a = predicciones.iloc[0]
-    goles_b = predicciones.iloc[1]
+    goles_a = float(predicciones.iloc[0])
+    goles_b = float(predicciones.iloc[1])
 
-    return goles_a, goles_b
+    # =========================
+    # AJUSTE POR RATING / ELO
+    # =========================
+
+    elo_a = obtener_elo_equipo(equipo_a, ratings_df)
+    elo_b = obtener_elo_equipo(equipo_b, ratings_df)
+
+    diferencia_elo = elo_a - elo_b
+
+    # Convertimos la diferencia Elo en un factor de ajuste suave
+    factor_a = 10 ** ((diferencia_elo / 400) * peso_elo)
+    factor_b = 10 ** ((-diferencia_elo / 400) * peso_elo)
+
+    goles_a_ajustado = goles_a * factor_a
+    goles_b_ajustado = goles_b * factor_b
+
+    # Conservamos el total de goles esperados del modelo original
+    total_original = goles_a + goles_b
+    total_ajustado = goles_a_ajustado + goles_b_ajustado
+
+    if total_ajustado > 0:
+        escala = total_original / total_ajustado
+
+        goles_a_ajustado = goles_a_ajustado * escala
+        goles_b_ajustado = goles_b_ajustado * escala
+
+    return goles_a_ajustado, goles_b_ajustado
+
 
 
 def ajuste_dc_individual(goles_a, goles_b, lambda_a, lambda_b, rho=-0.05):
@@ -199,13 +318,17 @@ def predecir_marcador_poisson_dc(
     equipo_b,
     neutral=True,
     max_goles=8,
-    rho=-0.05
+    rho=-0.05,
+    ratings_df=None,
+    peso_elo=0.35
 ):
     lambda_a, lambda_b = goles_esperados_poisson(
         modelo_poisson,
         equipo_a,
         equipo_b,
-        neutral=neutral
+        neutral=neutral,
+        ratings_df=ratings_df,
+        peso_elo=peso_elo
     )
 
     resultados = []
@@ -247,6 +370,7 @@ def predecir_marcador_poisson_dc(
     return resultados_df, lambda_a, lambda_b
 
 
+
 def resumen_resultado(resultados):
     gana_a = resultados[resultados["goles_a"] > resultados["goles_b"]]["probabilidad"].sum()
     empate = resultados[resultados["goles_a"] == resultados["goles_b"]]["probabilidad"].sum()
@@ -286,7 +410,9 @@ def mostrar_reporte_partido(
     neutral=True,
     max_goles=8,
     rho=-0.05,
-    key_prefix="partido"
+    key_prefix="partido",
+    ratings_df=None,
+    peso_elo=0.35
 ):
     resultados, xg_a, xg_b = predecir_marcador_poisson_dc(
         modelo_poisson,
@@ -294,7 +420,9 @@ def mostrar_reporte_partido(
         equipo_b,
         neutral=neutral,
         max_goles=max_goles,
-        rho=rho
+        rho=rho,
+        ratings_df=ratings_df,
+        peso_elo=peso_elo
     )
 
     top10 = resultados.head(10).copy()
@@ -436,6 +564,14 @@ rho = st.sidebar.slider(
     step=0.01
 )
 
+peso_elo = st.sidebar.slider(
+    "Peso rating/Elo",
+    min_value=0.0,
+    max_value=1.0,
+    value=0.35,
+    step=0.05
+)
+
 
 # =========================
 # ENTRENAR
@@ -448,10 +584,13 @@ with st.spinner("Cargando datos y entrenando modelo..."):
         xi=xi
     )
 
+ratings_equipos = cargar_ratings()
+
 
 with st.sidebar.expander("Información del modelo"):
     st.write("Partidos usados:", info_modelo["partidos_usados"])
     st.write("Equipos usados:", info_modelo["equipos_usados"])
+    st.write("Ratings cargados:", len(ratings_equipos))
     st.write("Fecha inicio:", info_modelo["fecha_inicio"])
 
 
@@ -550,7 +689,9 @@ with tab_uno:
                 neutral=neutral_partido,
                 max_goles=max_goles,
                 rho=rho,
-                key_prefix="individual"
+                key_prefix="individual",
+                ratings_df=ratings_equipos,
+                peso_elo=peso_elo
             )
     else:
         st.info("Selecciona dos equipos y da clic en Calcular marcador.")
@@ -650,7 +791,9 @@ with tab_dia:
                         neutral=True,
                         max_goles=max_goles,
                         rho=rho,
-                        key_prefix=f"fecha_{fecha_seleccionada}_{i}"
+                        key_prefix=f"fecha_{fecha_seleccionada}_{i}",
+                        ratings_df=ratings_equipos,
+                        peso_elo=peso_elo
                     )
 
                     temp = resultados.copy()
