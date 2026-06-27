@@ -113,6 +113,97 @@ def obtener_elo_equipo(equipo, ratings_df):
 
     return float(fila["elo"].iloc[0])
 
+
+@st.cache_data
+def cargar_forma_mundial():
+    """
+    Carga resultados del Mundial 2026 y calcula forma reciente por equipo.
+    La forma se suaviza para no sobre-reaccionar con pocos partidos.
+    """
+    try:
+        resultados = pd.read_csv("resultados_mundial_2026.csv")
+    except FileNotFoundError:
+        return pd.DataFrame(columns=[
+            "equipo",
+            "partidos",
+            "gf",
+            "ga",
+            "gf_prom",
+            "ga_prom",
+            "ataque_forma",
+            "defensa_debilidad_forma"
+        ])
+
+    if resultados.empty:
+        return pd.DataFrame(columns=[
+            "equipo",
+            "partidos",
+            "gf",
+            "ga",
+            "gf_prom",
+            "ga_prom",
+            "ataque_forma",
+            "defensa_debilidad_forma"
+        ])
+
+    home = resultados[["home_team", "home_score", "away_score"]].copy()
+    home.columns = ["equipo", "gf", "ga"]
+
+    away = resultados[["away_team", "away_score", "home_score"]].copy()
+    away.columns = ["equipo", "gf", "ga"]
+
+    forma_base = pd.concat([home, away], ignore_index=True)
+
+    forma = forma_base.groupby("equipo").agg(
+        partidos=("equipo", "count"),
+        gf=("gf", "sum"),
+        ga=("ga", "sum")
+    ).reset_index()
+
+    forma["gf_prom"] = forma["gf"] / forma["partidos"]
+    forma["ga_prom"] = forma["ga"] / forma["partidos"]
+
+    promedio_gf = forma_base["gf"].mean()
+    promedio_ga = forma_base["ga"].mean()
+
+    if promedio_gf <= 0 or not np.isfinite(promedio_gf):
+        promedio_gf = 1.0
+
+    if promedio_ga <= 0 or not np.isfinite(promedio_ga):
+        promedio_ga = 1.0
+
+    # Suavizado: con 1 partido se ajusta poco; con 3+ partidos pesa más.
+    k_suavizado = 3
+    forma["shrink"] = forma["partidos"] / (forma["partidos"] + k_suavizado)
+
+    ataque_crudo = forma["gf_prom"] / promedio_gf
+    defensa_debilidad_cruda = forma["ga_prom"] / promedio_ga
+
+    forma["ataque_forma"] = 1 + forma["shrink"] * (ataque_crudo - 1)
+    forma["defensa_debilidad_forma"] = 1 + forma["shrink"] * (defensa_debilidad_cruda - 1)
+
+    # Evita extremos por muestras pequeñas o resultados muy raros.
+    forma["ataque_forma"] = forma["ataque_forma"].clip(0.65, 1.60)
+    forma["defensa_debilidad_forma"] = forma["defensa_debilidad_forma"].clip(0.65, 1.60)
+
+    return forma
+
+
+def obtener_forma_equipo(equipo, forma_df):
+    if forma_df is None or forma_df.empty:
+        return 1.0, 1.0, 0
+
+    fila = forma_df[forma_df["equipo"] == equipo]
+
+    if fila.empty:
+        return 1.0, 1.0, 0
+
+    ataque = float(fila["ataque_forma"].iloc[0])
+    defensa_debilidad = float(fila["defensa_debilidad_forma"].iloc[0])
+    partidos = int(fila["partidos"].iloc[0])
+
+    return ataque, defensa_debilidad, partidos
+
 # =========================
 # ENTRENAR MODELO
 # =========================
@@ -254,7 +345,9 @@ def goles_esperados_poisson(
     equipo_b,
     neutral=True,
     ratings_df=None,
-    peso_elo=0.35
+    peso_elo=0.35,
+    forma_df=None,
+    peso_forma=0.30
 ):
     is_home_a = 0 if neutral else 1
 
@@ -278,25 +371,52 @@ def goles_esperados_poisson(
 
     diferencia_elo = elo_a - elo_b
 
-    # Convertimos la diferencia Elo en un factor de ajuste suave
+    # Convertimos la diferencia Elo en un factor de ajuste suave.
     factor_a = 10 ** ((diferencia_elo / 400) * peso_elo)
     factor_b = 10 ** ((-diferencia_elo / 400) * peso_elo)
 
     goles_a_ajustado = goles_a * factor_a
     goles_b_ajustado = goles_b * factor_b
 
-    # Conservamos el total de goles esperados del modelo original
+    # El ajuste Elo redistribuye los goles esperados, pero conserva el total original.
     total_original = goles_a + goles_b
-    total_ajustado = goles_a_ajustado + goles_b_ajustado
+    total_elo = goles_a_ajustado + goles_b_ajustado
 
-    if total_ajustado > 0:
-        escala = total_original / total_ajustado
+    if total_elo > 0:
+        escala = total_original / total_elo
+        goles_a_ajustado *= escala
+        goles_b_ajustado *= escala
 
-        goles_a_ajustado = goles_a_ajustado * escala
-        goles_b_ajustado = goles_b_ajustado * escala
+    # =========================
+    # AJUSTE POR FORMA DEL MUNDIAL ACTUAL
+    # =========================
 
-    return goles_a_ajustado, goles_b_ajustado
+    ataque_a, defensa_debilidad_a, partidos_a = obtener_forma_equipo(equipo_a, forma_df)
+    ataque_b, defensa_debilidad_b, partidos_b = obtener_forma_equipo(equipo_b, forma_df)
 
+    # Ataque propio + fragilidad defensiva del rival.
+    factor_forma_a = (ataque_a * defensa_debilidad_b) ** peso_forma
+    factor_forma_b = (ataque_b * defensa_debilidad_a) ** peso_forma
+
+    goles_a_forma = goles_a_ajustado * factor_forma_a
+    goles_b_forma = goles_b_ajustado * factor_forma_b
+
+    # La forma sí puede subir/bajar el total esperado, pero con límites.
+    total_antes_forma = goles_a_ajustado + goles_b_ajustado
+    total_despues_forma = goles_a_forma + goles_b_forma
+
+    if total_antes_forma > 0 and total_despues_forma > 0:
+        ratio_total = total_despues_forma / total_antes_forma
+        ratio_total_limitado = np.clip(ratio_total, 0.75, 1.35)
+        escala_total = ratio_total_limitado / ratio_total
+        goles_a_forma *= escala_total
+        goles_b_forma *= escala_total
+
+    # Evita valores absurdos por cualquier combinación extrema.
+    goles_a_forma = float(np.clip(goles_a_forma, 0.05, 6.5))
+    goles_b_forma = float(np.clip(goles_b_forma, 0.05, 6.5))
+
+    return goles_a_forma, goles_b_forma
 
 
 def ajuste_dc_individual(goles_a, goles_b, lambda_a, lambda_b, rho=-0.05):
@@ -320,7 +440,9 @@ def predecir_marcador_poisson_dc(
     max_goles=8,
     rho=-0.05,
     ratings_df=None,
-    peso_elo=0.35
+    peso_elo=0.35,
+    forma_df=None,
+    peso_forma=0.30
 ):
     lambda_a, lambda_b = goles_esperados_poisson(
         modelo_poisson,
@@ -328,7 +450,9 @@ def predecir_marcador_poisson_dc(
         equipo_b,
         neutral=neutral,
         ratings_df=ratings_df,
-        peso_elo=peso_elo
+        peso_elo=peso_elo,
+        forma_df=forma_df,
+        peso_forma=peso_forma
     )
 
     resultados = []
@@ -412,7 +536,9 @@ def mostrar_reporte_partido(
     rho=-0.05,
     key_prefix="partido",
     ratings_df=None,
-    peso_elo=0.35
+    peso_elo=0.35,
+    forma_df=None,
+    peso_forma=0.30
 ):
     resultados, xg_a, xg_b = predecir_marcador_poisson_dc(
         modelo_poisson,
@@ -422,7 +548,9 @@ def mostrar_reporte_partido(
         max_goles=max_goles,
         rho=rho,
         ratings_df=ratings_df,
-        peso_elo=peso_elo
+        peso_elo=peso_elo,
+        forma_df=forma_df,
+        peso_forma=peso_forma
     )
 
     top10 = resultados.head(10).copy()
@@ -572,6 +700,14 @@ peso_elo = st.sidebar.slider(
     step=0.05
 )
 
+peso_forma = st.sidebar.slider(
+    "Peso forma Mundial actual",
+    min_value=0.0,
+    max_value=1.0,
+    value=0.30,
+    step=0.05
+)
+
 
 # =========================
 # ENTRENAR
@@ -585,12 +721,14 @@ with st.spinner("Cargando datos y entrenando modelo..."):
     )
 
 ratings_equipos = cargar_ratings()
+forma_mundial = cargar_forma_mundial()
 
 
 with st.sidebar.expander("Información del modelo"):
     st.write("Partidos usados:", info_modelo["partidos_usados"])
     st.write("Equipos usados:", info_modelo["equipos_usados"])
     st.write("Ratings cargados:", len(ratings_equipos))
+    st.write("Equipos con forma Mundial:", len(forma_mundial))
     st.write("Fecha inicio:", info_modelo["fecha_inicio"])
 
 
@@ -691,7 +829,9 @@ with tab_uno:
                 rho=rho,
                 key_prefix="individual",
                 ratings_df=ratings_equipos,
-                peso_elo=peso_elo
+                peso_elo=peso_elo,
+                forma_df=forma_mundial,
+                peso_forma=peso_forma
             )
     else:
         st.info("Selecciona dos equipos y da clic en Calcular marcador.")
@@ -793,7 +933,9 @@ with tab_dia:
                         rho=rho,
                         key_prefix=f"fecha_{fecha_seleccionada}_{i}",
                         ratings_df=ratings_equipos,
-                        peso_elo=peso_elo
+                        peso_elo=peso_elo,
+                        forma_df=forma_mundial,
+                        peso_forma=peso_forma
                     )
 
                     temp = resultados.copy()

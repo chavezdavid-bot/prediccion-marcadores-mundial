@@ -1,41 +1,41 @@
 fecha,equipo_a,equipo_b,grupo,sede
-2026-06-20,Germany,Ivory Coast,E,Toronto
 2026-06-20,Ecuador,Curaçao,E,Kansas City
+2026-06-20,Germany,Ivory Coast,E,Toronto
 2026-06-20,Netherlands,Sweden,F,Houston
 2026-06-20,Tunisia,Japan,F,Monterrey
-2026-06-21,Uruguay,Cape Verde,H,Miami
-2026-06-21,Spain,Saudi Arabia,H,Atlanta
 2026-06-21,Belgium,Iran,G,Los Angeles
 2026-06-21,New Zealand,Egypt,G,Vancouver
-2026-06-22,Norway,Senegal,I,New York New Jersey
+2026-06-21,Spain,Saudi Arabia,H,Atlanta
+2026-06-21,Uruguay,Cape Verde,H,Miami
 2026-06-22,France,Iraq,I,Philadelphia
+2026-06-22,Norway,Senegal,I,New York New Jersey
 2026-06-22,Argentina,Austria,J,Dallas
 2026-06-22,Jordan,Algeria,J,San Francisco Bay Area
+2026-06-23,Colombia,DR Congo,K,Guadalajara
+2026-06-23,Portugal,Uzbekistan,K,Houston
 2026-06-23,England,Ghana,L,Boston
 2026-06-23,Panama,Croatia,L,Toronto
-2026-06-23,Portugal,Uzbekistan,K,Houston
-2026-06-23,Colombia,DR Congo,K,Guadalajara
-2026-06-24,Scotland,Brazil,C,Miami
-2026-06-24,Morocco,Haiti,C,Atlanta
-2026-06-24,Switzerland,Canada,B,Vancouver
-2026-06-24,Bosnia and Herzegovina,Qatar,B,Seattle
 2026-06-24,Czech Republic,Mexico,A,Mexico City
 2026-06-24,South Africa,South Korea,A,Monterrey
+2026-06-24,Bosnia and Herzegovina,Qatar,B,Seattle
+2026-06-24,Switzerland,Canada,B,Vancouver
+2026-06-24,Morocco,Haiti,C,Atlanta
+2026-06-24,Scotland,Brazil,C,Miami
+2026-06-25,Paraguay,Australia,D,San Francisco Bay Area
+2026-06-25,Turkey,United States,D,Los Angeles
 2026-06-25,Curaçao,Ivory Coast,E,Philadelphia
 2026-06-25,Ecuador,Germany,E,New York New Jersey
 2026-06-25,Japan,Sweden,F,Dallas
 2026-06-25,Tunisia,Netherlands,F,Kansas City
-2026-06-25,Turkey,United States,D,Los Angeles
-2026-06-25,Paraguay,Australia,D,San Francisco Bay Area
-2026-06-26,Norway,France,I,Boston
-2026-06-26,Senegal,Iraq,I,Toronto
 2026-06-26,Egypt,Iran,G,Seattle
 2026-06-26,New Zealand,Belgium,G,Vancouver
 2026-06-26,Cape Verde,Saudi Arabia,H,Houston
 2026-06-26,Uruguay,Spain,H,Guadalajara
-2026-06-27,Panama,England,L,New York New Jersey
-2026-06-27,Croatia,Ghana,L,Philadelphia
+2026-06-26,Norway,France,I,Boston
+2026-06-26,Senegal,Iraq,I,Toronto
 2026-06-27,Algeria,Austria,J,Kansas City
 2026-06-27,Jordan,Argentina,J,Dallas
 2026-06-27,Colombia,Portugal,K,Miami
 2026-06-27,DR Congo,Uzbekistan,K,Atlanta
+2026-06-27,Croatia,Ghana,L,Philadelphia
+2026-06-27,Panama,England,L,New York New Jersey
